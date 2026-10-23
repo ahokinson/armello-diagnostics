@@ -1,0 +1,75 @@
+name: Build collectors
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            binary: armello-diagnostics
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            binary: armello-diagnostics
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+            binary: armello-diagnostics.exe
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+      - name: Test
+        run: cargo test --locked
+      - name: Build
+        run: cargo build --release --locked
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: armello-diagnostics-${{ matrix.target }}
+          path: |
+            target/release/${{ matrix.binary }}
+            README.md
+          if-no-files-found: error
+
+  publish:
+    if: github.ref == 'refs/heads/develop'
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: armello-diagnostics-*
+          path: downloaded
+      - name: Package release assets
+        run: |
+          mkdir -p releases
+          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu x86_64-pc-windows-msvc; do
+            binary=armello-diagnostics
+            if [ "$target" = x86_64-pc-windows-msvc ]; then
+              binary=armello-diagnostics.exe
+            else
+              chmod 755 "downloaded/armello-diagnostics-${target}/target/release/${binary}"
+            fi
+            zip -q -j "releases/armello-diagnostics-${target}.zip" \
+              "downloaded/armello-diagnostics-${target}/target/release/${binary}" \
+              "downloaded/armello-diagnostics-${target}/README.md"
+          done
+          (cd releases && sha256sum ./*.zip > SHA256SUMS)
+      - name: Publish public release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="build-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gh release create "$tag" releases/*.zip releases/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Armello diagnostics build ${GITHUB_RUN_NUMBER}" \
+            --notes "Built from commit ${GITHUB_SHA}. Each ZIP includes installation instructions." \
+            --latest
